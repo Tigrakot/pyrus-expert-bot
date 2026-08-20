@@ -1,5 +1,4 @@
 module.exports = async (req, res) => {
-  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -16,7 +15,6 @@ module.exports = async (req, res) => {
     const body = req.body;
     console.log('Received webhook:', JSON.stringify(body, null, 2));
 
-    // Pyrus auth with bot credentials
     const authResponse = await fetch('https://accounts.pyrus.com/api/v4/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -37,54 +35,67 @@ module.exports = async (req, res) => {
       'Content-Type': 'application/json'
     };
 
-    // Parse form data from Pyrus webhook
     const taskId = body.task_id || body.task?.id;
-    const fields = body.task?.form?.fields || body.task?.fields || body.fields || [];
     
-    const getFieldValue = (name) => {
-      const field = fields.find(f => 
-        (f.name && f.name.toLowerCase().includes(name.toLowerCase())) ||
-        (f.field_name && f.field_name.toLowerCase().includes(name.toLowerCase()))
-      );
-      return field?.value || field?.text || '';
-    };
+    // Get fields from different possible locations
+    let fields = [];
+    if (body.task?.form?.fields) {
+      fields = body.task.form.fields;
+    } else if (body.task?.fields) {
+      fields = body.task.fields;
+    } else if (body.fields) {
+      fields = body.fields;
+    }
+
+    // Create lookup by name and by id
+    const fieldByName = {};
+    const fieldById = {};
+    for (const f of fields) {
+      if (f.name) fieldByName[f.name.toLowerCase()] = f;
+      if (f.id) fieldById[f.id] = f;
+    }
 
     // Parse price - handle "300,00" format
     const parsePrice = (val) => {
       if (typeof val === 'number') return val;
       if (typeof val === 'string') {
-        // Remove spaces and replace comma with nothing
         return parseFloat(val.replace(/\s/g, '').replace(',', '.')) || 0;
       }
       return 0;
     };
 
-    const expertName = getFieldValue('ФИО') || getFieldValue('фио') || getFieldValue('ФИО Эксперта');
-    const location = getFieldValue('Местоположение') || getFieldValue('местоположение');
-    const contacts = getFieldValue('Контакты') || getFieldValue('контакты');
-    const priceDoc = parsePrice(getFieldValue('Прием документов') || getFieldValue('Прием документов'));
-    const priceOsmotr = parsePrice(getFieldValue('Осмотр ТС') || getFieldValue('Осмотр ТС') || getFieldValue('Осмотр'));
-    const priceCity = parsePrice(getFieldValue('Выезд по городу') || getFieldValue('Выезд'));
-    const priceAgreement = parsePrice(getFieldValue('Соглашение'));
+    const getValue = (name) => {
+      const f = fieldByName[name.toLowerCase()];
+      return f?.value ?? f?.text ?? '';
+    };
+
+    // Exact field names from form
+    const expertName = getValue('ФИО Эксперта') || getValue('ФИО');
+    const location = getValue('Местоположение');
+    const contacts = getValue('Контакты');
+    const priceDoc = parsePrice(getValue('Прием документов'));
+    const priceOsmotr = parsePrice(getValue('Осмотр ТС') || getValue('Осмотр'));
+    const priceCity = parsePrice(getValue('Выезд по городу') || getValue('Выезд'));
+    const priceAgreement = parsePrice(getValue('Соглашение'));
+
+    console.log('Parsed values:', { expertName, location, contacts, priceDoc, priceOsmotr, priceCity, priceAgreement });
 
     if (!expertName) {
       console.log('Missing expert name, skipping...');
       return res.status(200).json({ message: 'No expert name found', received: true });
     }
 
-    console.log('Expert data:', { expertName, location, contacts, priceDoc, priceOsmotr, priceCity, priceAgreement });
-
-    // Add expert to catalog 232185 (Эксперты по осмотру)
+    // Add expert to catalog 232185
     const expertResponse = await fetch('https://api.pyrus.com/v4/catalogs/232185/items', {
       method: 'POST',
       headers,
       body: JSON.stringify({
         values: [
-          expertName,           // Эксперт
-          location,             // Местоположение
-          '',                   // цена выезда за город (not in this form)
-          contacts,             // Контакты
-          ''                    // Рейтинг/инфо по эксперту
+          expertName,
+          location,
+          '',
+          contacts,
+          ''
         ]
       })
     });
@@ -108,7 +119,7 @@ module.exports = async (req, res) => {
       nextId = maxId + 1;
     }
 
-    // Add expense items to catalog 232177 (Расходы по эксперту)
+    // Add expense items
     const expenseItems = [
       { id: nextId, name: 'Прием документов', price: priceDoc },
       { id: nextId + 1, name: 'Осмотр ТС', price: priceOsmotr },
@@ -134,7 +145,7 @@ module.exports = async (req, res) => {
 
         const expenseResult = await expenseResponse.json();
         addedExpenses.push({ id: expense.id, name: expense.name, price: expense.price });
-        console.log(`Expense ${expense.id} added:`, expenseResult);
+        console.log(`Expense ${expense.id} added`);
       }
     }
 
@@ -155,8 +166,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({
       success: true,
       expert: expertName,
-      expenses: addedExpenses,
-      nextId: nextId + 4
+      expenses: addedExpenses
     });
 
   } catch (error) {
